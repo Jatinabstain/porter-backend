@@ -1,81 +1,85 @@
-const Request = require('../models/Request');
-const User = require('../models/User');
+const pool = require('../db');
+const { v4: uuidv4 } = require('uuid');
 
 exports.createRequest = async (req, res) => {
-  const { pickup, dropoff, items, price } = req.body;
   try {
-    const request = new Request({
-      customer: req.user.id,
-      pickup,
-      dropoff,
-      items,
-      price,
-    });
-    await request.save();
-    res.json(request);
+    const { pickup, dropoff, items, price } = req.body;
+    if (!pickup || !dropoff) return res.status(400).json({ message: 'pickup and dropoff required' });
+
+    const id = uuidv4();
+    await pool.query(
+      `INSERT INTO requests (id, customer_id, pickup, dropoff, items, price, status, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,'open',NOW())`,
+      [id, req.user.id, pickup, dropoff, items || null, price || null]
+    );
+
+    const { rows } = await pool.query('SELECT * FROM requests WHERE id = $1', [id]);
+    res.json(rows[0]);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server error');
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
 exports.listRequests = async (req, res) => {
   try {
-    const { status, role } = req.query;
-    let query = {};
-    if (status) query.status = status;
-    // If driver: show open + assigned
-    if (req.user.role === 'driver') {
-      // drivers can filter but default show open
-      if (!status) query.status = 'open';
+    const { status } = req.query;
+    let query = 'SELECT r.*, u.name as customer_name, u.phone as customer_phone FROM requests r LEFT JOIN users u ON r.customer_id = u.id';
+    const params = [];
+    if (status) {
+      query += ' WHERE r.status = $1';
+      params.push(status);
     }
-    const requests = await Request.find(query).populate('customer', 'name phone email').populate('driver', 'name phone email').sort({ createdAt: -1 });
-    res.json(requests);
+    query += ' ORDER BY r.created_at DESC LIMIT 200';
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server error');
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
 exports.getRequest = async (req, res) => {
   try {
-    const request = await Request.findById(req.params.id).populate('customer', 'name phone email').populate('driver', 'name phone email');
-    if (!request) return res.status(404).json({ message: 'Request not found' });
-    res.json(request);
+    const { id } = req.params;
+    const { rows } = await pool.query('SELECT r.*, u.name as customer_name FROM requests r LEFT JOIN users u ON r.customer_id = u.id WHERE r.id = $1', [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Request not found' });
+    res.json(rows[0]);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server error');
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
 exports.acceptRequest = async (req, res) => {
   try {
-    const request = await Request.findById(req.params.id);
-    if (!request) return res.status(404).json({ message: 'Request not found' });
-    if (request.status !== 'open') return res.status(400).json({ message: 'Request not open' });
-    request.driver = req.user.id;
-    request.status = 'accepted';
-    await request.save();
-    res.json(request);
+    const { id } = req.params;
+    // check request
+    const { rows } = await pool.query('SELECT status FROM requests WHERE id = $1', [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Request not found' });
+    if (rows[0].status !== 'open') return res.status(400).json({ message: 'Request not open' });
+
+    await pool.query('UPDATE requests SET driver_id = $1, status = $2, accepted_at = NOW() WHERE id = $3', [req.user.id, 'accepted', id]);
+    const { rows: updated } = await pool.query('SELECT * FROM requests WHERE id = $1', [id]);
+    res.json(updated[0]);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server error');
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
 exports.updateStatus = async (req, res) => {
   try {
+    const { id } = req.params;
     const { status } = req.body;
-    const request = await Request.findById(req.params.id);
-    if (!request) return res.status(404).json({ message: 'Request not found' });
-    // Basic validation
-    const allowed = ['accepted','in_progress','completed','cancelled'];
+    const allowed = ['accepted', 'in_progress', 'completed', 'cancelled'];
     if (!allowed.includes(status)) return res.status(400).json({ message: 'Invalid status' });
-    request.status = status;
-    await request.save();
-    res.json(request);
+
+    await pool.query('UPDATE requests SET status = $1, updated_at = NOW() WHERE id = $2', [status, id]);
+    const { rows } = await pool.query('SELECT * FROM requests WHERE id = $1', [id]);
+    res.json(rows[0]);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server error');
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };

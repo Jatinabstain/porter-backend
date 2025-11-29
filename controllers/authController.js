@@ -1,57 +1,75 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const pool = require('../db');
+const { v4: uuidv4 } = require('uuid');
+
+const JWT_EXPIRES = '7d';
 
 exports.register = async (req, res) => {
-  const { name, email, password, phone, role } = req.body;
   try {
-    let user = await User.findOne({ email });
-    if (user) return res.status(400).json({ message: 'User already exists' });
+    const { name, email, phone, password, role = 'customer' } = req.body;
+    if (!name) return res.status(400).json({ message: 'Name required' });
 
-    user = new User({ name, email, phone, role });
+    // Check existing by email if provided
+    if (email) {
+      const { rows: found } = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+      if (found.length) return res.status(400).json({ message: 'User already exists' });
+    }
+
+    const id = uuidv4();
+    let hashed = null;
     if (password) {
       const salt = await bcrypt.genSalt(10);
-      user.password = await bcrypt.hash(password, salt);
+      hashed = await bcrypt.hash(password, salt);
     }
-    await user.save();
 
-    const payload = { user: { id: user.id, role: user.role } };
-    jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' }, (err, token) => {
-      if (err) throw err;
-      res.json({ token, user });
-    });
+    await pool.query(
+      `INSERT INTO users (id, name, email, phone, password, role, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,NOW())`,
+      [id, name, email || null, phone || null, hashed, role]
+    );
+
+    const payload = { user: { id, role } };
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: JWT_EXPIRES });
+
+    res.json({ token, user: { id, name, email, phone, role } });
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server error');
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
 exports.login = async (req, res) => {
-  const { email, password } = req.body;
   try {
-    const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ message: 'Invalid credentials' });
-    if (!user.password) return res.status(400).json({ message: 'No local password set for this user' });
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ message: 'Email and password required' });
+
+    const { rows } = await pool.query('SELECT id, name, email, phone, password, role FROM users WHERE email = $1', [email]);
+    if (!rows.length) return res.status(400).json({ message: 'Invalid credentials' });
+
+    const user = rows[0];
+    if (!user.password) return res.status(400).json({ message: 'No local password for this user' });
+
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) return res.status(400).json({ message: 'Invalid credentials' });
 
     const payload = { user: { id: user.id, role: user.role } };
-    jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' }, (err, token) => {
-      if (err) throw err;
-      res.json({ token, user });
-    });
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: JWT_EXPIRES });
+
+    res.json({ token, user: { id: user.id, name: user.name, email: user.email, phone: user.phone, role: user.role } });
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server error');
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
 exports.me = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password');
-    res.json(user);
+    const { rows } = await pool.query('SELECT id, name, email, phone, role, created_at FROM users WHERE id = $1', [req.user.id]);
+    if (!rows.length) return res.status(404).json({ message: 'User not found' });
+    res.json(rows[0]);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server error');
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };
